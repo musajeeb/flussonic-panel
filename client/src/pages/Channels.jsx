@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import api, { errMsg } from '../lib/api';
 import { Modal, StatusBadge, Empty, Alert, CopyField } from '../components/ui';
+import { usePagination, Pagination } from '../components/Pagination';
 import { Plus, Trash2, Pencil, RefreshCw, Loader2, Link2, Download, Search } from 'lucide-react';
 
 const BLANK = {
@@ -31,6 +32,7 @@ export default function Channels({ onCounts }) {
   const [busyId, setBusyId] = useState(null);
   const [urlsFor, setUrlsFor] = useState(null);
   const [loading, setLoading] = useState(true);
+  const pager = usePagination(channels, { defaultSize: 25, resetKey: `${filter}|${source}|${query}` });
 
   const load = useCallback(
     async ({ refresh = false } = {}) => {
@@ -114,9 +116,13 @@ export default function Channels({ onCounts }) {
       setEditing(null);
       await load();
       const warn = res.data.warning || res.data.data?.syncError;
-      if (warn) setError(`Saved locally, but Flussonic rejected it: ${warn}`);
+      if (warn) setError(warn);
       else {
-        setNotice('Channel pushed to Flussonic successfully.');
+        setNotice(
+          res.data.created > 1
+            ? `Channel created on ${res.data.created} servers.`
+            : 'Channel pushed to Flussonic successfully.'
+        );
         setTimeout(() => setNotice(''), 5000);
       }
     } catch (err) {
@@ -253,7 +259,7 @@ export default function Channels({ onCounts }) {
                 </tr>
               </thead>
               <tbody>
-                {channels.map((c) => (
+                {pager.visible.map((c) => (
                   <tr key={c.id}>
                     <td>
                       <div style={{ fontWeight: 600 }}>{c.title || c.name}</div>
@@ -310,11 +316,13 @@ export default function Channels({ onCounts }) {
                         <button className="btn btn-sm btn-icon" onClick={() => setUrlsFor(c)} title="Playback URLs">
                           <Link2 size={14} />
                         </button>
-                        {c.source !== 'server' && (
-                          <button className="btn btn-sm btn-icon" onClick={() => openEdit(c)} title="Edit">
-                            <Pencil size={14} />
-                          </button>
-                        )}
+                        <button
+                          className="btn btn-sm btn-icon"
+                          onClick={() => openEdit(c)}
+                          title={c.source === 'server' ? 'Edit (adds it to the panel)' : 'Edit'}
+                        >
+                          <Pencil size={14} />
+                        </button>
                         <button className="btn btn-sm btn-icon btn-danger" onClick={() => remove(c)} title="Delete">
                           <Trash2 size={14} />
                         </button>
@@ -324,6 +332,7 @@ export default function Channels({ onCounts }) {
                 ))}
               </tbody>
             </table>
+            <Pagination state={pager} label="channels" />
           </div>
         )}
       </div>
@@ -364,12 +373,20 @@ export default function Channels({ onCounts }) {
               <label>Target server *</label>
               <select value={form.serverId} onChange={set('serverId')} required disabled={editing !== 'new'}>
                 <option value="">Select a server…</option>
+                {editing === 'new' && servers.filter((s) => s.enabled !== false).length > 1 && (
+                  <option value="all">★ All servers ({servers.filter((s) => s.enabled !== false).length})</option>
+                )}
                 {servers.map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.name} ({s.category})
                   </option>
                 ))}
               </select>
+              {form.serverId === 'all' && (
+                <div className="help" style={{ color: 'var(--amber)' }}>
+                  This channel will be created on every enabled server, one after another.
+                </div>
+              )}
               {editing !== 'new' && <div className="help">To move a channel, delete it and recreate it on the other server.</div>}
             </div>
 

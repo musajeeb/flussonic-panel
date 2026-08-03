@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import api, { errMsg } from '../lib/api';
 import { Modal, StatusBadge, Empty, Alert } from '../components/ui';
+import { usePagination, Pagination } from '../components/Pagination';
 import { dateTime } from '../lib/format';
 import { Plus, Trash2, Pencil, Activity, Loader2, RotateCcw, ListRestart, Radio } from 'lucide-react';
 
@@ -26,6 +27,7 @@ export default function Servers({ onCounts }) {
   const [checkingId, setCheckingId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [streamsFor, setStreamsFor] = useState(null);
+  const pager = usePagination(servers, { defaultSize: 25 });
 
   const load = useCallback(async () => {
     try {
@@ -224,7 +226,7 @@ export default function Servers({ onCounts }) {
                 </tr>
               </thead>
               <tbody>
-                {servers.map((s) => (
+                {pager.visible.map((s) => (
                   <tr key={s.id}>
                     <td>
                       <div style={{ fontWeight: 600 }}>{s.name}</div>
@@ -280,6 +282,7 @@ export default function Servers({ onCounts }) {
                 ))}
               </tbody>
             </table>
+            <Pagination state={pager} label="servers" />
           </div>
         )}
       </div>

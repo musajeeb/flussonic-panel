@@ -8,7 +8,7 @@ import {
   assertUrl,
   HttpError,
 } from '../middleware/validate.js';
-import { upsertStream, deleteStream, playbackUrls, describeError } from '../services/flussonic.js';
+import { upsertStream, deleteStream, playbackUrls, describeError, getStream } from '../services/flussonic.js';
 import { getAllStreams, invalidate } from '../services/streamCache.js';
 
 const router = express.Router();
@@ -161,6 +161,35 @@ router.post(
   })
 );
 
+/** Creates the stream on one server, or on every enabled server at once. */
+async function createOnServer(db, server, draft) {
+  const clash = await db.channels.findOne({ serverId: server.id, name: draft.name });
+  if (clash) return { server, skipped: true, reason: `already exists on ${server.name}` };
+
+  let syncState = 'pending';
+  let syncError = '';
+  let lastSyncedAt = null;
+  try {
+    await upsertStream(server, draft);
+    syncState = 'synced';
+    lastSyncedAt = new Date();
+  } catch (err) {
+    syncState = 'error';
+    syncError = err.message;
+  }
+
+  const channel = await db.channels.create({
+    ...draft,
+    serverId: server.id,
+    category: draft.category || server.category || 'General',
+    syncState,
+    syncError,
+    lastSyncedAt,
+  });
+  invalidate(server.id);
+  return { server, channel, syncState, syncError };
+}
+
 router.post(
   '/',
   asyncRoute(async (req, res) => {
@@ -169,52 +198,118 @@ router.post(
 
     const name = assertStreamName(req.body.name);
     const sourceUrl = assertUrl(req.body.sourceUrl, 'Source URL');
+    const wantsAll = String(req.body.serverId).toLowerCase() === 'all';
 
-    const server = await db.servers.findById(String(req.body.serverId));
-    if (!server) throw new HttpError(404, 'Selected server not found');
-
-    const clash = await db.channels.findOne({ serverId: server.id, name });
-    if (clash) throw new HttpError(409, `Channel "${name}" already exists on ${server.name}`);
+    let targets;
+    if (wantsAll) {
+      targets = (await db.servers.find({})).filter((s) => s.enabled !== false);
+      if (targets.length === 0) throw new HttpError(400, 'No enabled servers to add this channel to');
+    } else {
+      const server = await db.servers.findById(String(req.body.serverId));
+      if (!server) throw new HttpError(404, 'Selected server not found');
+      targets = [server];
+    }
 
     const draft = {
       name,
       title: String(req.body.title || '').trim(),
-      serverId: server.id,
       sourceUrl,
-      category: String(req.body.category || server.category || 'General').trim(),
+      category: String(req.body.category || '').trim(),
       logo: String(req.body.logo || '').trim(),
       epgId: String(req.body.epgId || '').trim(),
       enabled: req.body.enabled !== false,
-      syncState: 'pending',
-      syncError: '',
+      origin: 'panel',
     };
 
-    // Push to Flussonic first; only record a "synced" state if the box accepted it.
-    let syncState = 'pending';
-    let syncError = '';
-    let lastSyncedAt = null;
-    try {
-      await upsertStream(server, draft);
-      syncState = 'synced';
-      lastSyncedAt = new Date();
-    } catch (err) {
-      syncState = 'error';
-      syncError = describeError(err) === 'Unknown error' ? err.message : err.message;
+    // Sequential: firing a config write at every server at once is how you take
+    // a whole fleet down with one typo.
+    const results = [];
+    for (const server of targets) results.push(await createOnServer(db, server, draft));
+
+    const created = results.filter((r) => r.channel);
+    if (created.length === 0) {
+      throw new HttpError(409, results.map((r) => r.reason).join('; ') || 'Nothing was created');
     }
 
-    const channel = await db.channels.create({ ...draft, syncState, syncError, lastSyncedAt });
-    invalidate(server.id);
+    const failed = created.filter((r) => r.syncState === 'error');
+    const skipped = results.filter((r) => r.skipped);
+
     res.status(201).json({
-      data: { ...channel, serverName: server.name, urls: playbackUrls(server, channel.name) },
-      warning: syncState === 'error' ? syncError : undefined,
+      data: created[0].channel,
+      created: created.length,
+      results: results.map((r) => ({
+        serverId: r.server.id,
+        serverName: r.server.name,
+        status: r.skipped ? 'skipped' : r.syncState,
+        error: r.syncError || r.reason || undefined,
+      })),
+      warning:
+        failed.length || skipped.length
+          ? [
+              failed.length ? `${failed.length} server(s) rejected it: ${failed[0].syncError}` : '',
+              skipped.length ? `${skipped.length} already had it` : '',
+            ]
+              .filter(Boolean)
+              .join('. ')
+          : undefined,
     });
   })
 );
+
+/**
+ * Adopts a stream that lives only on the server into the panel, reading its real
+ * configuration first so an edit cannot wipe the working source.
+ */
+async function adoptLiveChannel(db, liveId) {
+  const [, serverId, ...rest] = String(liveId).split(':');
+  const name = rest.join(':');
+  const server = await db.servers.findById(serverId);
+  if (!server) throw new HttpError(404, 'Server not found');
+
+  const existing = await db.channels.findOne({ serverId: server.id, name });
+  if (existing) return { server, channel: existing };
+
+  let live = null;
+  try {
+    live = await getStream(server, name);
+  } catch {
+    live = null;
+  }
+  if (!live) {
+    const [{ streams }] = await getAllStreams([server], { refresh: true });
+    live = streams.find((x) => x.name === name) ?? null;
+  }
+  if (!live) throw new HttpError(404, `Stream "${name}" not found on ${server.name}`);
+
+  const channel = await db.channels.create({
+    name,
+    title: live.title || '',
+    serverId: server.id,
+    sourceUrl: live.sourceUrl || '',
+    category: server.category || 'Uncategorised',
+    logo: live.logo || '',
+    epgId: '',
+    enabled: !live.disabled,
+    origin: 'imported',
+    syncState: 'synced',
+    syncError: '',
+    lastSyncedAt: new Date(),
+  });
+  invalidate(server.id);
+  return { server, channel };
+}
 
 router.put(
   '/:id',
   asyncRoute(async (req, res) => {
     const db = getDb();
+
+    // Editing a stream the panel has never stored: adopt it, then edit it.
+    if (String(req.params.id).startsWith('live:')) {
+      const { channel: adopted } = await adoptLiveChannel(db, req.params.id);
+      req.params.id = adopted.id;
+    }
+
     const channel = await db.channels.findById(req.params.id);
     if (!channel) throw new HttpError(404, 'Channel not found');
     const server = await db.servers.findById(channel.serverId);
