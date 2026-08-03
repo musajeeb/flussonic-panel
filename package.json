@@ -1,0 +1,36 @@
+{
+  "name": "flussonic-crm",
+  "version": "3.0.0",
+  "private": true,
+  "description": "Multi-server Flussonic management panel (servers, channels, IPTV users)",
+  "type": "module",
+  "main": "server/index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "build": "npm --prefix client run build",
+    "postinstall": "npm --prefix client install && npm --prefix client run build",
+    "dev": "concurrently -n api,web -c blue,magenta \"npm run dev:api\" \"npm run dev:web\"",
+    "dev:api": "node --watch server/index.js",
+    "dev:web": "npm --prefix client run dev",
+    "test": "node --test tests/*.test.js",
+    "check-db": "node server/scripts/check-db.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.4.1",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.9.5",
+    "morgan": "^1.10.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}
